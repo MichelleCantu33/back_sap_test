@@ -14,7 +14,7 @@ from datetime import datetime
 SAP_LOGIN_URL = "https://54.184.71.204:50000/b1s/v1/Login"
 SAP_ITEMS_URL = "https://54.184.71.204:50000/b1s/v1/Items?$filter=ItemsGroupCode eq 116"
 SAP_CREDENTIALS = {
-    "CompanyDB": "PRU_BIOCELLS_20250509",
+    "CompanyDB": "EC_SBO_BIOCELLS_PROD",
     "UserName": "manager",
     "Password": "Start1234"
 }
@@ -50,7 +50,7 @@ def login():
     # Conectar a SAP con credenciales fijas
     sap_url = "https://54.184.71.204:50000/b1s/v1/Login"
     sap_data = {
-        "CompanyDB": "PRU_BIOCELLS_20250509",
+        "CompanyDB": "EC_SBO_BIOCELLS_PROD",
         "UserName": "manager",  # Usuario fijo para SAP
         "Password": "Start1234"  # Contraseña fija para SAP
     }
@@ -155,7 +155,7 @@ def stock_transfer():
 
     login_sap_url = "https://54.184.71.204:50000/b1s/v1/Login"
     sap_data = {
-        "CompanyDB": "PRU_BIOCELLS_20250509",
+        "CompanyDB": "EC_SBO_BIOCELLS_PROD",
         "UserName": "manager",
         "Password": "Start1234"
     }
@@ -247,7 +247,7 @@ def get_business_partner_price_list(business_partner_id):
     # URL del login
     login_sap_url = "https://54.184.71.204:50000/b1s/v1/Login"
     sap_data = {
-        "CompanyDB": "PRU_BIOCELLS_20250509",
+        "CompanyDB": "EC_SBO_BIOCELLS_PROD",
         "UserName": "manager",
         "Password": "Start1234"
     }
@@ -302,7 +302,7 @@ def get_warehouses():
     # URL de login a SAP
     login_sap_url = "https://54.184.71.204:50000/b1s/v1/Login"
     sap_data = {
-        "CompanyDB": "PRU_BIOCELLS_20250509",
+        "CompanyDB": "EC_SBO_BIOCELLS_PROD",
         "UserName": "manager",  # Usuario fijo para SAP
         "Password": "Start1234"  # Contraseña fija para SAP
     }
@@ -412,7 +412,7 @@ def obtener_inventario():
     # Consulta SQL con parámetros dinámicos
     query = """
     SELECT "Código Item", "Nombre Item", "Código Almacen", "Nombre Almacen", "Cantidad", "Cod Barras", "Lote", "Fecha Vencimiento"
-    FROM PRU_BIOCELLS_20250509.BIOCELLS_INVENTARIO_BODEGA
+    FROM EC_SBO_BIOCELLS_PROD.BIOCELLS_INVENTARIO_BODEGA
     WHERE "Código Item" = ? AND "Código Almacen" = ?
     """
 
@@ -464,7 +464,7 @@ def obtener_reportinventario():
            "Código Almacen", "Nombre Almacen", "Cantidad", "Cantidad Comprometida", 
            "Stock Final", "Cod Barras", "Lote", "Fecha de Creación", "Fecha de Actualización", "Fecha Vencimiento", 
            "Grupo", "Subgrupo"
-    FROM PRU_BIOCELLS_20250509.BIOCELLS_INVENTARIO_TEJIDOS_BODEGA
+    FROM EC_SBO_BIOCELLS_PROD.BIOCELLS_INVENTARIO_TEJIDOS_BODEGA
     WHERE "Fecha de Actualización" <= ?
     """
 
@@ -565,7 +565,7 @@ def stock_transfer_archivo():
         # 🔹 CONEXIÓN A SAP 🔹
         login_sap_url = "https://54.184.71.204:50000/b1s/v1/Login"
         sap_data = {
-            "CompanyDB": "PRU_BIOCELLS_20250509",
+            "CompanyDB": "EC_SBO_BIOCELLS_PROD",
             "UserName": "manager",  # Usuario fijo para SAP
             "Password": "Start1234"  # Contraseña fija para SAP
         }
