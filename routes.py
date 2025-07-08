@@ -11,6 +11,7 @@ from flask_cors import CORS
 from datetime import datetime
 from werkzeug.utils import secure_filename
 import os
+from urllib.parse import quote
 
 # Configuración de credenciales de SAP
 SAP_LOGIN_URL = "https://54.184.71.204:50000/b1s/v1/Login"
@@ -20,6 +21,24 @@ SAP_CREDENTIALS = {
     "UserName": "manager",
     "Password": "Start1234"
 }
+def get_sap_session():
+    try:
+        login_response = requests.post(SAP_LOGIN_URL, json=SAP_CREDENTIALS, verify=False)
+        login_response.raise_for_status()
+        cookies = login_response.cookies
+
+        session_id = cookies.get('B1SESSION')
+        route_id = cookies.get('ROUTEID')
+
+        if not session_id:
+            raise Exception("No se pudo obtener B1SESSION del login")
+
+        return {
+            "Cookie": f"B1SESSION={session_id}; ROUTEID={route_id}",
+            "Content-Type": "application/json"
+        }
+    except Exception as e:
+        raise Exception(f"Error al obtener sesión de SAP: {str(e)}")
 
 CORS(app, supports_credentials=True)
 def obtener_cookies_sap():
@@ -514,6 +533,17 @@ def obtener_reportinventario():
     except Exception as e:
         return jsonify({"error": f"Error en la ejecución de la consulta: {e}"}), 500
 
+def verificar_codigo_cirugia_en_sap(codigo):
+    try:
+        connection = get_hana_connection() 
+        cursor = connection.cursor()
+        cursor.execute("SELECT * FROM \"EC_SBO_BIOCELLS_PROD\".\"@LVS_CODCIRUGIA\" WHERE \"Code\" = ?", (codigo,))
+        result = cursor.fetchone()
+        connection.close()
+        return result is not None
+    except Exception as e:
+        print("Error validando código cirugía:", e)
+        return False
 
 @app.route('/stock-transfer-archivo', methods=['POST'])
 def stock_transfer_archivo():
@@ -521,79 +551,102 @@ def stock_transfer_archivo():
         return jsonify({"error": "No se encontró ningún archivo"}), 400
 
     file = request.files['file']
-    
+
     try:
-        # Leer las hojas del Excel
         df_encabezado = pd.read_excel(file, sheet_name="Encabezado")
         df_lineas = pd.read_excel(file, sheet_name="Lineas")
         df_lotes = pd.read_excel(file, sheet_name="Lotes")
 
-        # 🔹 Convertir fechas a string en el encabezado
-        for col in ["DocDate", "DueDate", "TaxDate", "CreationDate", "UpdateDate"]:
-            if col in df_encabezado.columns:
-                df_encabezado[col] = df_encabezado[col].astype(str)
+        encabezado_map = {
+            "Fecha Documento": "DocDate",
+            "Fecha Vencimiento": "DueDate",
+            "Código Cliente": "CardCode",
+            "Comentarios": "Comments",
+            "Desde Bodega": "FromWarehouse",
+            "Hacia Bodega": "ToWarehouse",
+            "Fecha Impuestos": "TaxDate"
+        }
+        df_encabezado.rename(columns=encabezado_map, inplace=True)
 
-        # 🔹 Convertir encabezado a JSON
+        lineas_map = {
+            "Nro Línea": "LineNum",
+            "Código Ítem": "ItemCode",
+            "Cantidad": "Quantity"
+        }
+        df_lineas.rename(columns=lineas_map, inplace=True)
+
+        lotes_map = {
+            "Código de Barras": "BatchNumber",
+            "Cantidad": "Quantity",
+            "Nro Línea Base": "BaseLineNumber",
+            "Código Ítem": "ItemCode"
+        }
+        df_lotes.rename(columns=lotes_map, inplace=True)
+
+        if "BaseLineNumber" not in df_lotes.columns:
+            return jsonify({"error": "La hoja 'Lotes' debe contener la columna 'Nro Línea Base'"}), 400
+
+        for col in ["DocDate", "DueDate", "TaxDate"]:
+            if col in df_encabezado.columns:
+                df_encabezado[col] = pd.to_datetime(df_encabezado[col]).dt.strftime('%Y-%m-%d')
+
         encabezado = df_encabezado.iloc[0].to_dict()
 
-        # Convertir líneas a JSON
+        if "Código de Cirugía" in encabezado:
+            valor_cirugia = encabezado.pop("Código de Cirugía")
+            if pd.notna(valor_cirugia):
+                if verificar_codigo_cirugia_en_sap(valor_cirugia):
+                    encabezado["U_LS_COD_CIRUGIA"] = valor_cirugia
+                else:
+                    return jsonify({"error": f"El código de cirugía '{valor_cirugia}' no existe en SAP."}), 400
+
+        encabezado["Printed"] = "tNO"
+        encabezado["Series"] = 27
+        encabezado["JournalMemo"] = f"Inventory Transfers - {encabezado.get('CardCode', '')}"
+
         lineas_json = []
         for _, row in df_lineas.iterrows():
-            # 🔹 Convertir fechas en las líneas si hay alguna
             for col in ["ExpiryDate"]:
                 if col in row and not pd.isna(row[col]):
                     row[col] = str(row[col])
 
-            # Filtrar los lotes correspondientes a esta línea
-            lotes = df_lotes[df_lotes["BaseLineNumber"] == row["LineNum"]].copy()
+            if "FromWarehouseCode" not in row or pd.isna(row.get("FromWarehouseCode")):
+                row["FromWarehouseCode"] = encabezado.get("FromWarehouse")
+            if "WarehouseCode" not in row or pd.isna(row.get("WarehouseCode")):
+                row["WarehouseCode"] = encabezado.get("ToWarehouse")
 
-            # 🔹 Convertir fechas en los lotes
+            lotes = df_lotes[df_lotes["BaseLineNumber"] == row["LineNum"]].copy()
             for col in ["ExpiryDate"]:
                 if col in lotes.columns:
                     lotes[col] = lotes[col].astype(str)
-
             lotes_json = lotes.to_dict(orient="records")
 
-            # Convertir línea a diccionario
             linea = row.to_dict()
-            linea["BatchNumbers"] = lotes_json  # Agregar lotes a la línea
-
+            linea["BatchNumbers"] = lotes_json
             lineas_json.append(linea)
 
-        # Construir JSON final
         json_data = encabezado
         json_data["StockTransferLines"] = lineas_json
 
-        # 🔹 CONEXIÓN A SAP 🔹
         login_sap_url = "https://54.184.71.204:50000/b1s/v1/Login"
         sap_data = {
             "CompanyDB": "EC_SBO_BIOCELLS_PROD",
-            "UserName": "manager",  # Usuario fijo para SAP
-            "Password": "Start1234"  # Contraseña fija para SAP
+            "UserName": "manager",
+            "Password": "Start1234"
         }
-
-        # Realizar login en SAP
         response = requests.post(login_sap_url, json=sap_data, verify=False)
 
         if response.status_code == 200:
-            # Obtener las cookies de sesión
             cookies = response.cookies
-            print("Cookies obtenidas del login:", cookies)
-
-            # URL de SAP para la transferencia de stock
             sap_url = "https://54.184.71.204:50000/b1s/v1/StockTransfers"
-
-            # Construir los encabezados con las cookies obtenidas
             headers = {
                 'Content-Type': 'application/json',
                 'Cookie': f'B1SESSION={cookies.get("B1SESSION")}; ROUTEID={cookies.get("ROUTEID")}'
             }
-
-            # Enviar solicitud a SAP
             transfer_response = requests.post(sap_url, json=json_data, headers=headers, verify=False)
 
             if transfer_response.status_code == 201:
-                return jsonify(transfer_response.json()), transfer_response.status_code
+                return jsonify(transfer_response.json()), 201
             else:
                 return jsonify({'error': 'Error en SAP', 'details': transfer_response.text}), transfer_response.status_code
 
@@ -602,6 +655,8 @@ def stock_transfer_archivo():
 
     except Exception as e:
         return jsonify({"error": "Error procesando el archivo", "details": str(e)}), 500
+
+
     
 @app.route('/create_inventory_transfer/<int:doc_entry>', methods=['POST'])
 def create_inventory_transfer(doc_entry):
@@ -1015,3 +1070,142 @@ def verificar_usuario():
         "rol": usuario.Rol
     }), 200
 
+@app.route('/activos-fijos', methods=['GET'])
+def obtener_activos_fijos():
+    try:
+        headers = obtener_cabecera_sesion_sap()
+        if not headers:
+            return jsonify({"error": "No se pudo obtener sesión de SAP"}), 500
+
+        url = "https://54.184.71.204:50000/b1s/v1/Items?$filter=ItemType eq 'itFixedAssets'"
+        response = requests.get(url, headers=headers, verify=False)
+
+        if response.status_code == 200:
+            items = response.json().get("value", [])
+            return jsonify(items), 200
+        else:
+            return jsonify({"error": "Error al obtener activos", "detalles": response.text}), response.status_code
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/activos-fijos/<item_code>', methods=['GET'])
+def obtener_activo_fijo(item_code):
+    try:
+        headers = obtener_cabecera_sesion_sap()
+        if not headers:
+            return jsonify({"error": "No se pudo obtener sesión de SAP"}), 500
+
+        url = f"https://54.184.71.204:50000/b1s/v1/Items('{item_code}')"
+        response = requests.get(url, headers=headers, verify=False)
+
+        if response.status_code == 200:
+            return jsonify(response.json()), 200
+        else:
+            return jsonify({"error": "Activo no encontrado", "detalles": response.text}), response.status_code
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/activos-fijos/<item_code>', methods=['PUT']) 
+def actualizar_activo_fijo(item_code):
+    data = request.json
+
+    # Campos permitidos, incluyendo ahora BarCode
+    campos_permitidos = ['AssetSerialNumber', 'U_LS_BODEGA', 'U_SYP_CCLIENTE', 'BarCode']
+    payload = {campo: data[campo] for campo in campos_permitidos if campo in data}
+
+    if not payload:
+        return jsonify({"error": "No se proporcionaron campos válidos para actualizar"}), 400
+
+    try:
+        headers = obtener_cabecera_sesion_sap()
+        if not headers:
+            return jsonify({"error": "No se pudo obtener sesión de SAP"}), 500
+
+        url = f"https://54.184.71.204:50000/b1s/v1/Items('{item_code}')"
+        response = requests.patch(url, headers=headers, json=payload, verify=False)
+
+        if response.status_code == 204:
+            return jsonify({"mensaje": f"Activo fijo '{item_code}' actualizado correctamente"}), 200
+        else:
+            return jsonify({"error": "Error al actualizar activo", "detalles": response.text}), response.status_code
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/activos-fijos-vista', methods=['GET'])
+def obtener_activos_fijos_desde_vista():
+    conn = get_hana_connection()
+    if conn is None:
+        return jsonify({"error": "No se pudo conectar a HANA"}), 500
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM "EC_SBO_BIOCELLS_PROD"."INVENTARIO_AF" WHERE "Cantidad" > 0')
+        columnas = [col[0] for col in cursor.description]
+        activos = [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
+        return jsonify(activos), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+@app.route('/stock-transfers-filtradas', methods=['GET'])
+def obtener_stock_transfers_filtradas():
+    try:
+        conn = get_hana_connection()  # asegúrate que esta función devuelve una conexión válida
+        cursor = conn.cursor()
+
+        query = '''
+        SELECT 
+            "DocEntry", 
+            "DocNum", 
+            "DocDate", 
+            "CardCode", 
+            "CardName", 
+            "SlpCode", 
+            "Comments", 
+            "Filler", 
+            "ToWhsCode"
+        FROM "EC_SBO_BIOCELLS_PROD"."TRANSFERENCIAS_FILTRADAS_TEJIDOS"
+        '''
+        cursor.execute(query)
+        columnas = [col[0] for col in cursor.description]
+        datos = [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
+
+        return jsonify(datos), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Error al obtener transferencias filtradas: {str(e)}"}), 500
+
+
+@app.route('/get_stock_transfer_detail/<int:doc_entry>', methods=['GET'])
+def get_stock_transfer_detail(doc_entry):
+    try:
+        login_response = requests.post(SAP_LOGIN_URL, json=SAP_CREDENTIALS, verify=False)
+        if login_response.status_code != 200:
+            return jsonify({"error": "Error en la autenticación"}), login_response.status_code
+
+        cookies = login_response.cookies
+        session_id = cookies.get("B1SESSION")
+        route_id = cookies.get("ROUTEID")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        cookies_dict = {
+            "B1SESSION": session_id
+        }
+        if route_id:
+            cookies_dict["ROUTEID"] = route_id
+
+        url = f"https://54.184.71.204:50000/b1s/v1/StockTransfers({doc_entry})"
+        response = requests.get(url, headers=headers, cookies=cookies_dict, verify=False)
+
+        if response.status_code == 200:
+            return jsonify(response.json())
+        else:
+            return jsonify({"error": "Error al obtener detalle", "status_code": response.status_code, "message": response.text}), response.status_code
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
