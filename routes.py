@@ -689,6 +689,7 @@ def create_inventory_transfer(doc_entry):
         "DocDate": date.today().isoformat(),
         "Comments": f"Creado desde solicitud #{transfer_request.get('DocNum')}",
         "U_BIO_EstadoTR": "A", 
+        "U_LS_COD_CIRUGIA": "Tejidos",
         "StockTransferLines": []
     }
 
