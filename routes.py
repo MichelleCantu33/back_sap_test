@@ -553,108 +553,137 @@ def stock_transfer_archivo():
     file = request.files['file']
 
     try:
-        df_encabezado = pd.read_excel(file, sheet_name="Encabezado")
-        df_lineas = pd.read_excel(file, sheet_name="Lineas")
-        df_lotes = pd.read_excel(file, sheet_name="Lotes")
+        # ---------------------- CARGA DE HOJAS ----------------------
+        try:
+            df_encabezado = pd.read_excel(file, sheet_name="Encabezado")
+            df_lineas = pd.read_excel(file, sheet_name="Lineas")
+            df_lotes = pd.read_excel(file, sheet_name="Lotes")
+        except Exception as e:
+            return jsonify({"error": "Error al leer hojas del Excel", "details": str(e)}), 500
 
-        encabezado_map = {
-            "Fecha Documento": "DocDate",
-            "Fecha Vencimiento": "DueDate",
-            "Código Cliente": "CardCode",
-            "Comentarios": "Comments",
-            "Desde Bodega": "FromWarehouse",
-            "Hacia Bodega": "ToWarehouse",
-            "Fecha Impuestos": "TaxDate"
-        }
-        df_encabezado.rename(columns=encabezado_map, inplace=True)
+        # ---------------------- RENOMBRE DE COLUMNAS ----------------------
+        try:
+            encabezado_map = {
+                "Fecha Documento": "DocDate",
+                "Fecha Vencimiento": "DueDate",
+                "Código Cliente": "CardCode",
+                "Comentarios": "Comments",
+                "Desde Bodega": "FromWarehouse",
+                "Hacia Bodega": "ToWarehouse",
+                "Fecha Impuestos": "TaxDate"
+            }
+            df_encabezado.rename(columns=encabezado_map, inplace=True)
 
-        lineas_map = {
-            "Nro Línea": "LineNum",
-            "Código Ítem": "ItemCode",
-            "Cantidad": "Quantity"
-        }
-        df_lineas.rename(columns=lineas_map, inplace=True)
+            lineas_map = {
+                "Nro Línea": "LineNum",
+                "Código Ítem": "ItemCode",
+                "Cantidad": "Quantity"
+            }
+            df_lineas.rename(columns=lineas_map, inplace=True)
 
-        lotes_map = {
-            "Código de Barras": "BatchNumber",
-            "Cantidad": "Quantity",
-            "Nro Línea Base": "BaseLineNumber",
-            "Código Ítem": "ItemCode"
-        }
-        df_lotes.rename(columns=lotes_map, inplace=True)
+            lotes_map = {
+                "Código de Barras": "BatchNumber",
+                "Cantidad": "Quantity",
+                "Nro Línea Base": "BaseLineNumber",
+                "Código Ítem": "ItemCode"
+            }
+            df_lotes.rename(columns=lotes_map, inplace=True)
+        except Exception as e:
+            return jsonify({"error": "Error al renombrar columnas", "details": str(e)}), 500
 
         if "BaseLineNumber" not in df_lotes.columns:
             return jsonify({"error": "La hoja 'Lotes' debe contener la columna 'Nro Línea Base'"}), 400
 
-        for col in ["DocDate", "DueDate", "TaxDate"]:
-            if col in df_encabezado.columns:
-                df_encabezado[col] = pd.to_datetime(df_encabezado[col]).dt.strftime('%Y-%m-%d')
+        # ---------------------- FORMATO DE FECHAS ----------------------
+        try:
+            for col in ["DocDate", "DueDate", "TaxDate"]:
+                if col in df_encabezado.columns:
+                    df_encabezado[col] = pd.to_datetime(df_encabezado[col]).dt.strftime('%Y-%m-%d')
+        except Exception as e:
+            return jsonify({"error": "Error al convertir fechas", "details": str(e)}), 500
 
-        encabezado = df_encabezado.iloc[0].to_dict()
+        # ---------------------- CONSTRUCCIÓN DEL ENCABEZADO ----------------------
+        try:
+            encabezado = df_encabezado.iloc[0].to_dict()
 
-        if "Código de Cirugía" in encabezado:
-            valor_cirugia = encabezado.pop("Código de Cirugía")
-            if pd.notna(valor_cirugia):
-                if verificar_codigo_cirugia_en_sap(valor_cirugia):
-                    encabezado["U_LS_COD_CIRUGIA"] = valor_cirugia
-                else:
-                    return jsonify({"error": f"El código de cirugía '{valor_cirugia}' no existe en SAP."}), 400
+            if "Código de Cirugía" in encabezado:
+                valor_cirugia = encabezado.pop("Código de Cirugía")
+                if pd.notna(valor_cirugia):
+                    if verificar_codigo_cirugia_en_sap(valor_cirugia):
+                        encabezado["U_LS_COD_CIRUGIA"] = valor_cirugia
+                    else:
+                        return jsonify({"error": f"El código de cirugía '{valor_cirugia}' no existe en SAP."}), 400
 
-        encabezado["Printed"] = "tNO"
-        encabezado["Series"] = 27
-        encabezado["JournalMemo"] = f"Inventory Transfers - {encabezado.get('CardCode', '')}"
+            encabezado["Printed"] = "tNO"
+            encabezado["Series"] = 27
+            encabezado["JournalMemo"] = f"Inventory Transfers - {encabezado.get('CardCode', '')}"
+        except Exception as e:
+            return jsonify({"error": "Error construyendo encabezado", "details": str(e)}), 500
 
-        lineas_json = []
-        for _, row in df_lineas.iterrows():
-            for col in ["ExpiryDate"]:
-                if col in row and not pd.isna(row[col]):
-                    row[col] = str(row[col])
+        # ---------------------- LÓGICA DE LÍNEAS Y LOTES ----------------------
+        try:
+            lineas_json = []
+            for _, row in df_lineas.iterrows():
+                for col in ["ExpiryDate"]:
+                    if col in row and not pd.isna(row[col]):
+                        row[col] = str(row[col])
 
-            if "FromWarehouseCode" not in row or pd.isna(row.get("FromWarehouseCode")):
-                row["FromWarehouseCode"] = encabezado.get("FromWarehouse")
-            if "WarehouseCode" not in row or pd.isna(row.get("WarehouseCode")):
-                row["WarehouseCode"] = encabezado.get("ToWarehouse")
+                if "FromWarehouseCode" not in row or pd.isna(row.get("FromWarehouseCode")):
+                    row["FromWarehouseCode"] = encabezado.get("FromWarehouse")
+                if "WarehouseCode" not in row or pd.isna(row.get("WarehouseCode")):
+                    row["WarehouseCode"] = encabezado.get("ToWarehouse")
 
-            lotes = df_lotes[df_lotes["BaseLineNumber"] == row["LineNum"]].copy()
-            for col in ["ExpiryDate"]:
-                if col in lotes.columns:
-                    lotes[col] = lotes[col].astype(str)
-            lotes_json = lotes.to_dict(orient="records")
+                lotes = df_lotes[df_lotes["BaseLineNumber"] == row["LineNum"]].copy()
+                for col in ["ExpiryDate"]:
+                    if col in lotes.columns:
+                        lotes[col] = lotes[col].astype(str)
+                lotes_json = lotes.to_dict(orient="records")
 
-            linea = row.to_dict()
-            linea["BatchNumbers"] = lotes_json
-            lineas_json.append(linea)
+                linea = row.to_dict()
+                linea["BatchNumbers"] = lotes_json
+                lineas_json.append(linea)
 
-        json_data = encabezado
-        json_data["StockTransferLines"] = lineas_json
+            json_data = encabezado
+            json_data["StockTransferLines"] = lineas_json
+        except Exception as e:
+            return jsonify({"error": "Error construyendo detalle de líneas/lotes", "details": str(e)}), 500
 
-        login_sap_url = "https://54.184.71.204:50000/b1s/v1/Login"
-        sap_data = {
-            "CompanyDB": "EC_SBO_BIOCELLS_PROD",
-            "UserName": "manager",
-            "Password": "Start1234"
-        }
-        response = requests.post(login_sap_url, json=sap_data, verify=False)
+        # ---------------------- LOGIN A SAP ----------------------
+        try:
+            login_sap_url = "https://54.184.71.204:50000/b1s/v1/Login"
+            sap_data = {
+                "CompanyDB": "EC_SBO_BIOCELLS_PROD",
+                "UserName": "manager",
+                "Password": "Start1234"
+            }
+            response = requests.post(login_sap_url, json=sap_data, verify=False)
 
-        if response.status_code == 200:
+            if response.status_code != 200:
+                return jsonify({'error': 'Error en el login de SAP', 'details': response.text}), response.status_code
+        except Exception as e:
+            return jsonify({"error": "Error durante login en SAP", "details": str(e)}), 500
+
+        # ---------------------- TRANSACCIÓN EN SAP ----------------------
+        try:
             cookies = response.cookies
             sap_url = "https://54.184.71.204:50000/b1s/v1/StockTransfers"
             headers = {
                 'Content-Type': 'application/json',
                 'Cookie': f'B1SESSION={cookies.get("B1SESSION")}; ROUTEID={cookies.get("ROUTEID")}'
             }
+
             transfer_response = requests.post(sap_url, json=json_data, headers=headers, verify=False)
 
             if transfer_response.status_code == 201:
                 return jsonify(transfer_response.json()), 201
             else:
-                return jsonify({'error': 'Error en SAP', 'details': transfer_response.text}), transfer_response.status_code
-
-        else:
-            return jsonify({'error': 'Error en el login de SAP', 'details': response.text}), response.status_code
+                return jsonify({'error': 'Error en SAP al crear la transferencia', 'details': transfer_response.text}), transfer_response.status_code
+        except Exception as e:
+            return jsonify({"error": "Error enviando datos a SAP", "details": str(e)}), 500
 
     except Exception as e:
-        return jsonify({"error": "Error procesando el archivo", "details": str(e)}), 500
+        return jsonify({"error": "Error general en el procesamiento", "details": str(e)}), 500
+
 
 
     
