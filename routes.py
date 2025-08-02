@@ -11,6 +11,7 @@ from flask_cors import CORS
 from datetime import datetime
 from werkzeug.utils import secure_filename
 import os
+import traceback
 from urllib.parse import quote
 
 # Configuración de credenciales de SAP
@@ -561,6 +562,9 @@ def stock_transfer_archivo():
         except Exception as e:
             return jsonify({"error": "Error al leer hojas del Excel", "details": str(e)}), 500
 
+        if df_encabezado.empty:
+            return jsonify({"error": "La hoja 'Encabezado' no contiene registros"}), 400
+
         # ---------------------- RENOMBRE DE COLUMNAS ----------------------
         try:
             encabezado_map = {
@@ -571,6 +575,7 @@ def stock_transfer_archivo():
                 "Desde Bodega": "FromWarehouse",
                 "Hacia Bodega": "ToWarehouse",
                 "Fecha Impuestos": "TaxDate"
+                # ❌ No incluir "Código de Cirugía" aquí
             }
             df_encabezado.rename(columns=encabezado_map, inplace=True)
 
@@ -606,8 +611,9 @@ def stock_transfer_archivo():
         try:
             encabezado = df_encabezado.iloc[0].to_dict()
 
-            if "Código de Cirugía" in encabezado:
-                valor_cirugia = encabezado.pop("Código de Cirugía")
+            # 🔍 Verifica si existe la columna "Código de Cirugía"
+            if "Código de Cirugía" in df_encabezado.columns:
+                valor_cirugia = df_encabezado.at[0, "Código de Cirugía"]
                 if pd.notna(valor_cirugia):
                     if verificar_codigo_cirugia_en_sap(valor_cirugia):
                         encabezado["U_LS_COD_CIRUGIA"] = valor_cirugia
@@ -624,9 +630,8 @@ def stock_transfer_archivo():
         try:
             lineas_json = []
             for _, row in df_lineas.iterrows():
-                for col in ["ExpiryDate"]:
-                    if col in row and not pd.isna(row[col]):
-                        row[col] = str(row[col])
+                if "ExpiryDate" in row and not pd.isna(row["ExpiryDate"]):
+                    row["ExpiryDate"] = str(row["ExpiryDate"])
 
                 if "FromWarehouseCode" not in row or pd.isna(row.get("FromWarehouseCode")):
                     row["FromWarehouseCode"] = encabezado.get("FromWarehouse")
@@ -634,9 +639,8 @@ def stock_transfer_archivo():
                     row["WarehouseCode"] = encabezado.get("ToWarehouse")
 
                 lotes = df_lotes[df_lotes["BaseLineNumber"] == row["LineNum"]].copy()
-                for col in ["ExpiryDate"]:
-                    if col in lotes.columns:
-                        lotes[col] = lotes[col].astype(str)
+                if "ExpiryDate" in lotes.columns:
+                    lotes["ExpiryDate"] = lotes["ExpiryDate"].astype(str)
                 lotes_json = lotes.to_dict(orient="records")
 
                 linea = row.to_dict()
@@ -682,6 +686,7 @@ def stock_transfer_archivo():
             return jsonify({"error": "Error enviando datos a SAP", "details": str(e)}), 500
 
     except Exception as e:
+        print("Error general:", traceback.format_exc())
         return jsonify({"error": "Error general en el procesamiento", "details": str(e)}), 500
 
 
