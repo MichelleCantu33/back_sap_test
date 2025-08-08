@@ -546,6 +546,8 @@ def verificar_codigo_cirugia_en_sap(codigo):
         print("Error validando código cirugía:", e)
         return False
 
+import unicodedata
+
 @app.route('/stock-transfer-archivo', methods=['POST'])
 def stock_transfer_archivo():
     if 'file' not in request.files:
@@ -565,17 +567,22 @@ def stock_transfer_archivo():
         if df_encabezado.empty:
             return jsonify({"error": "La hoja 'Encabezado' no contiene registros"}), 400
 
+        # ---------------------- LIMPIEZA DE COLUMNAS ----------------------
+        df_encabezado.columns = [
+            unicodedata.normalize('NFKD', col).encode('ascii', 'ignore').decode('utf-8').strip()
+            for col in df_encabezado.columns
+        ]
+
         # ---------------------- RENOMBRE DE COLUMNAS ----------------------
         try:
             encabezado_map = {
                 "Fecha Documento": "DocDate",
                 "Fecha Vencimiento": "DueDate",
-                "Código Cliente": "CardCode",
+                "Codigo Cliente": "CardCode",
                 "Comentarios": "Comments",
                 "Desde Bodega": "FromWarehouse",
                 "Hacia Bodega": "ToWarehouse",
                 "Fecha Impuestos": "TaxDate"
-                # ❌ No incluir "Código de Cirugía" aquí
             }
             df_encabezado.rename(columns=encabezado_map, inplace=True)
 
@@ -609,20 +616,28 @@ def stock_transfer_archivo():
 
         # ---------------------- CONSTRUCCIÓN DEL ENCABEZADO ----------------------
         try:
-            encabezado = df_encabezado.iloc[0].to_dict()
+            encabezado_raw = df_encabezado.iloc[0].to_dict()
 
-            # 🔍 Verifica si existe la columna "Código de Cirugía"
-            if "Codigo de Cirugia" in df_encabezado.columns:
-                valor_cirugia = df_encabezado.at[0, "Codigo de Cirugia"]
-                if pd.notna(valor_cirugia):
-                    if verificar_codigo_cirugia_en_sap(valor_cirugia):
-                        encabezado["U_LS_COD_CIRUGIA"] = valor_cirugia
-                    else:
-                        return jsonify({"error": f"El código de cirugía '{valor_cirugia}' no existe en SAP."}), 400
+            encabezado = {
+                "DocDate": encabezado_raw.get("DocDate"),
+                "DueDate": encabezado_raw.get("DueDate"),
+                "TaxDate": encabezado_raw.get("TaxDate"),
+                "CardCode": encabezado_raw.get("CardCode"),
+                "Comments": encabezado_raw.get("Comments"),
+                "FromWarehouse": encabezado_raw.get("FromWarehouse"),
+                "ToWarehouse": encabezado_raw.get("ToWarehouse"),
+                "Printed": "tNO",
+                "Series": 27,
+                "JournalMemo": f"Inventory Transfers - {encabezado_raw.get('CardCode', '')}"
+            }
 
-            encabezado["Printed"] = "tNO"
-            encabezado["Series"] = 27
-            encabezado["JournalMemo"] = f"Inventory Transfers - {encabezado.get('CardCode', '')}"
+            # Campo adicional UDF - Código de Cirugía
+            valor_cirugia = encabezado_raw.get("Codigo de Cirugia")
+            if valor_cirugia and pd.notna(valor_cirugia):
+                if verificar_codigo_cirugia_en_sap(valor_cirugia):
+                    encabezado["U_LS_COD_CIRUGIA"] = valor_cirugia
+                else:
+                    return jsonify({"error": f"El código de cirugía '{valor_cirugia}' no existe en SAP."}), 400
         except Exception as e:
             return jsonify({"error": "Error construyendo encabezado", "details": str(e)}), 500
 
@@ -649,6 +664,10 @@ def stock_transfer_archivo():
 
             json_data = encabezado
             json_data["StockTransferLines"] = lineas_json
+
+            # OPCIONAL: imprimir JSON final para verificar
+            # print(json.dumps(json_data, indent=2, ensure_ascii=False))
+
         except Exception as e:
             return jsonify({"error": "Error construyendo detalle de líneas/lotes", "details": str(e)}), 500
 
@@ -688,6 +707,7 @@ def stock_transfer_archivo():
     except Exception as e:
         print("Error general:", traceback.format_exc())
         return jsonify({"error": "Error general en el procesamiento", "details": str(e)}), 500
+
 
 
 
