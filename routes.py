@@ -612,8 +612,8 @@ def stock_transfer_archivo():
             encabezado = df_encabezado.iloc[0].to_dict()
 
             # 🔍 Verifica si existe la columna "Código de Cirugía"
-            if "Código de Cirugía" in df_encabezado.columns:
-                valor_cirugia = df_encabezado.at[0, "Código de Cirugía"]
+            if "Codigo de Cirugia" in df_encabezado.columns:
+                valor_cirugia = df_encabezado.at[0, "Codigo de Cirugia"]
                 if pd.notna(valor_cirugia):
                     if verificar_codigo_cirugia_en_sap(valor_cirugia):
                         encabezado["U_LS_COD_CIRUGIA"] = valor_cirugia
