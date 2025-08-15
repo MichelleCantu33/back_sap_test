@@ -13,6 +13,10 @@ from werkzeug.utils import secure_filename
 import os
 import traceback
 from urllib.parse import quote
+import unicodedata
+from datetime import datetime, timedelta
+from utils_logs import rows_to_line_objs, diff_lineas
+
 
 # Configuración de credenciales de SAP
 SAP_LOGIN_URL = "https://54.184.71.204:50000/b1s/v1/Login"
@@ -113,7 +117,7 @@ def check_inventory_transfer():
 
         # Obtener los filtros desde los parámetros de la consulta
         document_status = request.args.get('DocumentStatus', 'bost_Open')
-        sales_person_code = request.args.get('SalesPersonCode', '66')
+        sales_person_code = request.args.get('SalesPersonCode', '56')
 
         # Realizamos la solicitud al endpoint InventoryTransferRequests con los filtros
         filter_url = "https://54.184.71.204:50000/b1s/v1/InventoryTransferRequests"
@@ -546,8 +550,6 @@ def verificar_codigo_cirugia_en_sap(codigo):
         print("Error validando código cirugía:", e)
         return False
 
-import unicodedata
-
 @app.route('/stock-transfer-archivo', methods=['POST'])
 def stock_transfer_archivo():
     if 'file' not in request.files:
@@ -708,9 +710,6 @@ def stock_transfer_archivo():
         print("Error general:", traceback.format_exc())
         return jsonify({"error": "Error general en el procesamiento", "details": str(e)}), 500
 
-
-
-
     
 @app.route('/create_inventory_transfer/<int:doc_entry>', methods=['POST'])
 def create_inventory_transfer(doc_entry):
@@ -824,19 +823,16 @@ def crear_caja_instrumental():
     try:
         cursor = conn.cursor()
 
-        # 🔍 Validar si el Code ya existe
         cursor.execute("""
             SELECT COUNT(*) FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB" WHERE "Code" = ?
         """, (data["CodigoCaja"],))
         if cursor.fetchone()[0] > 0:
             return jsonify({"error": f"La caja con código '{data['CodigoCaja']}' ya existe"}), 409
 
-        # 🆕 Obtener el nuevo DocEntry
         cursor.execute('SELECT MAX("DocEntry") FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB"')
         ultimo_docentry = cursor.fetchone()[0] or 0
         nuevo_docentry = ultimo_docentry + 1
 
-        # 🧾 Insertar cabecera (ahora con U_LS_ITEM)
         cursor.execute("""
             INSERT INTO "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB"
             ("DocEntry", "Code", "U_LS_FECHA", "U_LS_ALM", "U_LS_CLASECAJA", "U_LS_ITEM")
@@ -847,12 +843,11 @@ def crear_caja_instrumental():
             data["FechaCaja"],
             data["Almacen"],
             data["ClaseCaja"],
-            data["CodigoCaja"]  # U_LS_ITEM ← Código Caja
+            data["CodigoCaja"]
         ))
 
-        # 📦 Insertar líneas con campo opcional Descripcion (U_LS_ITEM_NAME)
         for i, linea in enumerate(data["Lineas"], start=1):
-            descripcion = linea.get("Descripcion")  # puede ser None si no se envía
+            descripcion = linea.get("Descripcion")
             cursor.execute("""
                 INSERT INTO "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_LIN"
                 ("Code", "LineId", "U_LS_ITEM", "U_LS_ITEM_NAME", "U_LS_CANT", "U_LS_TIPO", "U_LS_LOTE")
@@ -868,6 +863,13 @@ def crear_caja_instrumental():
             ))
 
         conn.commit()
+
+        # Log conciso
+        resumen_lineas = [f"{l['CodigoItem']} x{l['CantidadItem']}" for l in data.get("Lineas",[])]
+        detalle_log = f"Creó caja. Líneas agregadas: {', '.join(resumen_lineas) if resumen_lineas else 'ninguna'}"
+        observacion = request.headers.get("observacion", "")
+        registrar_log(conn, data["CodigoCaja"], "INSERTAR", detalle_log, observacion)
+
         return jsonify({
             "mensaje": "Caja creada correctamente",
             "DocEntry": nuevo_docentry,
@@ -880,7 +882,7 @@ def crear_caja_instrumental():
     finally:
         conn.close()
 
-        
+       
 @app.route('/cajas-instrumental', methods=['GET'])
 def obtener_cajas_instrumental():
     conn = get_hana_connection()
@@ -907,15 +909,29 @@ def actualizar_caja_instrumental(codigo):
     try:
         cursor = conn.cursor()
 
-        # Verificar que la caja existe
+        # 🔍 Cabecera anterior
         cursor.execute("""
-            SELECT COUNT(*) FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB"
+            SELECT "U_LS_FECHA", "U_LS_ALM", "U_LS_CLASECAJA", "U_LS_ITEM"
+            FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB"
             WHERE "Code" = ?
         """, (codigo,))
-        if cursor.fetchone()[0] == 0:
+        registro_anterior = cursor.fetchone()
+
+        if not registro_anterior:
             return jsonify({"error": f"La caja '{codigo}' no existe"}), 404
 
-        # Actualizar cabecera (incluyendo U_LS_ITEM con el mismo código)
+        campos = ["FechaCaja", "Almacen", "ClaseCaja", "CodigoCaja"]
+        registro_anterior_dict = dict(zip(campos, registro_anterior))
+
+        # 🔍 Líneas anteriores
+        cursor.execute("""
+            SELECT "U_LS_ITEM", "U_LS_ITEM_NAME", "U_LS_CANT", "U_LS_TIPO", "U_LS_LOTE"
+            FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_LIN"
+            WHERE "Code" = ?
+        """, (codigo,))
+        lineas_antes = rows_to_line_objs(cursor.fetchall())
+
+        # 🔁 Actualiza cabecera
         cursor.execute("""
             UPDATE "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB"
             SET "U_LS_FECHA" = ?, "U_LS_ALM" = ?, "U_LS_CLASECAJA" = ?, "U_LS_ITEM" = ?
@@ -928,15 +944,9 @@ def actualizar_caja_instrumental(codigo):
             codigo
         ))
 
-        # Eliminar líneas existentes
-        cursor.execute("""
-            DELETE FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_LIN"
-            WHERE "Code" = ?
-        """, (codigo,))
-
-        # Insertar nuevas líneas con campo opcional Descripcion (U_LS_ITEM_NAME)
+        # 🔁 Reemplaza líneas
+        cursor.execute("""DELETE FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_LIN" WHERE "Code" = ?""", (codigo,))
         for i, linea in enumerate(data["Lineas"], start=1):
-            descripcion = linea.get("Descripcion")
             cursor.execute("""
                 INSERT INTO "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_LIN"
                 ("Code", "LineId", "U_LS_ITEM", "U_LS_ITEM_NAME", "U_LS_CANT", "U_LS_TIPO", "U_LS_LOTE")
@@ -945,13 +955,42 @@ def actualizar_caja_instrumental(codigo):
                 codigo,
                 i,
                 linea["CodigoItem"],
-                descripcion,
+                linea.get("Descripcion"),
                 linea["CantidadItem"],
                 linea["TipoItem"],
                 linea["LoteItem"]
             ))
 
         conn.commit()
+
+        # ✅ Dif de cabecera
+        cambios_cab = []
+        for campo in ("FechaCaja","Almacen","ClaseCaja"):
+            anterior = str(registro_anterior_dict.get(campo))
+            nuevo = str(data.get(campo))
+            if anterior != nuevo:
+                cambios_cab.append(f"{campo}: '{anterior}' → '{nuevo}'")
+
+        # ✅ Dif de líneas
+        agregadas, eliminadas, actualizadas = diff_lineas(lineas_antes, data.get("Lineas", []))
+
+        partes = []
+        if cambios_cab:
+            partes.append("Cabecera: " + "; ".join(cambios_cab))
+        if agregadas:
+            partes.append("Líneas agregadas: " + ", ".join([f"{l['CodigoItem']}({l.get('LoteItem','')}) x{l['CantidadItem']}" for l in agregadas]))
+        if eliminadas:
+            partes.append("Líneas eliminadas: " + ", ".join([f"{l['CodigoItem']}({l.get('LoteItem','')}) x{l['CantidadItem']}" for l in eliminadas]))
+        if actualizadas:
+            # Muestra cambios clave sin ser verboso
+            partes.append("Líneas actualizadas: " + ", ".join(
+                [f"{a['antes']['CodigoItem']}({a['antes'].get('LoteItem','')}): {a['antes']['CantidadItem']}→{a['despues']['CantidadItem']}" for a in actualizadas]
+            ))
+
+        detalle_log = " | ".join(partes) if partes else "Sin cambios"
+        observacion = request.headers.get("observacion", "")
+        registrar_log(conn, codigo, "ACTUALIZAR", detalle_log, observacion)
+
         return jsonify({"mensaje": f"Caja '{codigo}' actualizada correctamente"}), 200
 
     except Exception as e:
@@ -959,6 +998,7 @@ def actualizar_caja_instrumental(codigo):
         return jsonify({"error": f"Error al actualizar la caja: {str(e)}"}), 500
     finally:
         conn.close()
+
 
 @app.route('/cajas-instrumental/<codigo>', methods=['DELETE'])
 def eliminar_caja_instrumental(codigo):
@@ -969,27 +1009,23 @@ def eliminar_caja_instrumental(codigo):
     try:
         cursor = conn.cursor()
 
-        # Verificar que la caja existe
         cursor.execute("""
-            SELECT COUNT(*) FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB"
+            SELECT 1 FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB"
             WHERE "Code" = ?
         """, (codigo,))
-        if cursor.fetchone()[0] == 0:
+        existe = cursor.fetchone()
+        if not existe:
             return jsonify({"error": f"La caja '{codigo}' no existe"}), 404
 
-        # Eliminar líneas
-        cursor.execute("""
-            DELETE FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_LIN"
-            WHERE "Code" = ?
-        """, (codigo,))
-
-        # Eliminar cabecera
-        cursor.execute("""
-            DELETE FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB"
-            WHERE "Code" = ?
-        """, (codigo,))
+        cursor.execute("""DELETE FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_LIN" WHERE "Code" = ?""", (codigo,))
+        cursor.execute("""DELETE FROM "EC_SBO_BIOCELLS_PROD"."@LS_CAJ_CAB" WHERE "Code" = ?""", (codigo,))
 
         conn.commit()
+
+        # Log minimal
+        observacion = request.headers.get("observacion", "")
+        registrar_log(conn, codigo, "ELIMINAR", "Eliminó caja completa (cabecera y líneas).", observacion)
+
         return jsonify({"mensaje": f"Caja '{codigo}' eliminada correctamente"}), 200
 
     except Exception as e:
@@ -997,6 +1033,7 @@ def eliminar_caja_instrumental(codigo):
         return jsonify({"error": f"Error al eliminar la caja: {str(e)}"}), 500
     finally:
         conn.close()
+
 
 
 @app.route('/warehouses', methods=['GET'])
@@ -1262,5 +1299,135 @@ def get_stock_transfer_detail(doc_entry):
             return jsonify(response.json())
         else:
             return jsonify({"error": "Error al obtener detalle", "status_code": response.status_code, "message": response.text}), response.status_code
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+def registrar_log(conn, codigo_caja, accion, detalle, observacion=""):
+    try:
+        usuario = request.headers.get("usuario", "Sistema")
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO "EC_SBO_BIOCELLS_PROD"."BIOCELLS_LOG_CAJAS_INSTRUMENTAL"
+            ("CodigoCaja", "Accion", "Usuario", "FechaHora", "Detalle","OBSERVACION")
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            codigo_caja,
+            accion,
+            usuario,
+            datetime.now(),
+            detalle,
+            observacion
+        ))
+        conn.commit()  # opcional: si prefieres asegurar que el log no se pierda
+    except Exception as e:
+        print(f"Error al registrar log: {e}")
+
+
+def obtener_logs_desde_db(codigo_caja):
+    try:
+        conn = get_hana_connection()  # Usa tu propia función de conexión
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT "CodigoCaja", "Accion", "Usuario", "FechaHora", "Detalle", "OBSERVACION"
+            FROM "EC_SBO_BIOCELLS_PROD"."BIOCELLS_LOG_CAJAS_INSTRUMENTAL"
+            WHERE "CodigoCaja" = ?
+            ORDER BY "FechaHora" DESC
+        """, (codigo_caja,))
+        rows = cursor.fetchall()
+        logs = [
+            {
+                "codigo_caja": r[0],
+                "accion": r[1],
+                "usuario": r[2],
+                "fecha": r[3],
+                "detalle": r[4],
+                "observacion": r[5]
+            }
+            for r in rows
+        ]
+        return logs
+    except Exception as e:
+        print(f"Error al obtener logs: {e}")
+        return []
+
+@app.route('/logs-caja/<codigo_caja>', methods=['GET'])
+def obtener_logs_por_caja(codigo_caja):
+    logs = obtener_logs_desde_db(codigo_caja)
+    return jsonify(logs)
+
+@app.route('/logs-caja', methods=['GET'])
+def listar_logs_caja():
+    codigo = request.args.get('codigo', '').strip()
+    usuario = request.args.get('usuario', '').strip()
+    desde = request.args.get('desde', '').strip()   # yyyy-mm-dd
+    hasta = request.args.get('hasta', '').strip()   # yyyy-mm-dd
+
+    try:
+        conn = get_hana_connection()
+        cursor = conn.cursor()
+
+        sql = """
+            SELECT "CodigoCaja", "Accion", "Usuario", "FechaHora", "Detalle", "OBSERVACION"
+            FROM "EC_SBO_BIOCELLS_PROD"."BIOCELLS_LOG_CAJAS_INSTRUMENTAL"
+            WHERE 1=1
+        """
+        params = []
+
+        if codigo:
+            sql += ' AND "CodigoCaja" = ?'
+            params.append(codigo)
+
+        if usuario:
+            sql += ' AND LOWER("Usuario") LIKE ?'
+            params.append(f'%{usuario.lower()}%')
+
+        # Fechas inclusivas: desde 00:00:00 y hasta < día siguiente 00:00:00
+        if desde:
+            d = datetime.fromisoformat(desde).replace(hour=0, minute=0, second=0, microsecond=0)
+            sql += ' AND "FechaHora" >= ?'
+            params.append(d)
+
+        if hasta:
+            h = datetime.fromisoformat(hasta).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            sql += ' AND "FechaHora" < ?'
+            params.append(h)
+
+        sql += ' ORDER BY "FechaHora" DESC LIMIT 1000'
+
+        cursor.execute(sql, tuple(params))
+        rows = cursor.fetchall()
+
+        logs = []
+        for r in rows:
+            fecha = r[3]
+            # Asegura ISO 8601 (ej. 2025-08-12T13:45:00)
+            fecha_iso = fecha.isoformat() if isinstance(fecha, datetime) else str(fecha)
+            logs.append({
+                "codigo_caja": r[0],
+                "accion": r[1],
+                "usuario": r[2],
+                "fecha": fecha_iso,
+                "detalle": r[4],
+                "observacion": r[5]
+            })
+
+        return jsonify(logs)
+
+    except Exception as e:
+        return jsonify({"error": f"Error al obtener logs: {e}"}), 500
+
+#Endpoint para consumir articulos y af para cajas 
+@app.route('/inventario-af-cajas', methods=['GET'])
+def obtener_items_af_cajas():
+    try:
+        cursor = get_hana_connection().cursor()
+        cursor.execute("""
+            SELECT "Código", "Descripción", "Grupo de Artículos", "Tipo", "Estado"
+            FROM "EC_SBO_BIOCELLS_PROD"."INVENTARIO_AF_CAJAS"
+        """)
+        columnas = [desc[0] for desc in cursor.description]
+        datos = [dict(zip(columnas, row)) for row in cursor.fetchall()]
+        cursor.close()
+        return jsonify(datos)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
