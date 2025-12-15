@@ -1145,22 +1145,46 @@ def carga_masiva_cajas():
 
 @app.route('/verificar-usuario', methods=['POST'])
 def verificar_usuario():
-    data = request.json
-    correo = data.get("correo")
+    data = request.json or {}
+    correo = (data.get("correo") or "").strip()
 
     if not correo:
         return jsonify({"error": "Correo no proporcionado"}), 400
 
-    usuario = User.query.filter_by(Correo=correo).first()
+    conn = get_hana_connection()
+    if conn is None:
+        return jsonify({"error": "No se pudo conectar a HANA"}), 500
 
-    if not usuario:
-        return jsonify({"error": "Correo no registrado"}), 404
+    try:
+        cursor = conn.cursor()
 
-    return jsonify({
-        "nombre": usuario.Nombre,
-        "correo": usuario.Correo,
-        "rol": usuario.Rol
-    }), 200
+        # OJO: ajusta el esquema si tu tabla está en otro (yo asumo PRU_BIOCELLS_20251128)
+        query = '''
+            SELECT "Id", "Nombre", "Correo", "Rol"
+            FROM "BIOCELLS"."TOOLS_USER"
+            WHERE LOWER("Correo") = LOWER(?)
+        '''
+        cursor.execute(query, (correo,))
+        row = cursor.fetchone()
+
+        if not row:
+            return jsonify({"error": "Correo no registrado"}), 404
+
+        return jsonify({
+            "id": row[0],
+            "nombre": row[1],
+            "correo": row[2],
+            "rol": row[3]
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Error consultando usuario en HANA: {str(e)}"}), 500
+    finally:
+        try:
+            cursor.close()
+        except:
+            pass
+        conn.close()
 
 @app.route('/activos-fijos', methods=['GET'])
 def obtener_activos_fijos():
